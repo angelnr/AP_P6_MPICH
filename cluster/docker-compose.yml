@@ -14,6 +14,8 @@ services:
       - "${SSH_PORT}:22"
     networks:
       - net
+    cpus: '0.5'
+    mem_limit: 128M
 
   worker:
     image: $REGISTRY_ADDR:$REGISTRY_PORT/$IMAGE_NAME
@@ -21,6 +23,8 @@ services:
     entrypoint: ["mpi_bootstrap", "role=worker", "mpi_master_service_name=master", "mpi_worker_service_name=worker"]
     networks:
       - net
+    cpus: '0.5'
+    mem_limit: 128M
 
 networks:
   net:
