@@ -15,7 +15,9 @@ RUN apk update\
       && apk add python3 \
       && apk add linux-headers \
       && apk add nano \
-      && apk add bash 
+      && apk add bash \
+      && apk add valgrind \
+      && apk add gdb
 
 #### INSTALL MPICH ####
 # Source is available at http://www.mpich.org/static/downloads/
