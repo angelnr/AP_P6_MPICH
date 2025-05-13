@@ -15,6 +15,10 @@ COPY project/ .
 
 # Normal build command
 RUN mpicc -o mpi_hello_world mpi_hello_world.c
+RUN mpicc -o reduce reduce.c
+RUN mpicc -o bcast bcast.c
+RUN mpicc -o scatter_gather scatter_gather.c
+RUN mpicc -o send_recv send_recv.c
 
 # ####################
 # For Docker beginner:
