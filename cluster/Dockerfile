@@ -19,6 +19,11 @@ RUN mpicc -o reduce reduce.c
 RUN mpicc -o bcast bcast.c
 RUN mpicc -o scatter_gather scatter_gather.c
 RUN mpicc -o send_recv send_recv.c
+RUN mpicc -o block_row's_algorithm block_row's_algorithm.c
+RUN mpicc -o cannon's_algorithm cannon's_algorithm.c
+RUN mpicc -o fox's_algorithm fox's_algorithm.c
+RUN mpicc -o fox's_algorithm fox's_algorithm.c
+RUN mpicc -o strassen's_algorithm strassen's_algorithm.c
 
 # ####################
 # For Docker beginner:
