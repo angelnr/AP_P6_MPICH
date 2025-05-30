@@ -1,8 +1,8 @@
 /*
  * Distributed square matrix multiplication using MPI (MPICH)
  * -----------------------------------------------------------
- *  - Author: <your‑name>
- *  - Purpose: Practice C and distributed programming with MPICH.
+ *  - Author: Angel Navajas, Daniel Sanchez
+ *  - Purpose: Practice C and distributed programming with MPICH in a matrix multiplication exercise .
  *  - Features:
  *      • Random initialization of A and B with integers in [1,10]
  *      • Block‑row distribution of A, full broadcast of B
@@ -19,7 +19,7 @@
  *
  *  Notes
  *  -----
- *      • N must be divisible by the number of processes; otherwise the
+ *      • MATRIX_SIZE must be divisible by the number of processes; otherwise the
  *        program aborts.
  *      • The reported time is the maximum across all ranks so it reflects
  *        total wall‑clock runtime.
@@ -32,8 +32,8 @@
 
 #define MAX_VAL 10
 #define MIN_VAL 1
-#ifndef N
-#define N 1024
+#ifndef MATRIX_SIZE
+#define MATRIX_SIZE 1024
 #endif
 
 /*------------------------------------------------------------*/
@@ -51,21 +51,20 @@ int main(int argc, char *argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     /* Determine matrix order */
-    int n = N;
     if (argc > 1) {
-        n = atoi(argv[1]);
+        MATRIX_SIZE = atoi(argv[1]);
     }
 
-    if (n % 8 != 0) {
+    if (MATRIX_SIZE % 8 != 0) {
         if (rank == 0) fprintf(stderr, "Error: N (%d) must be a multiple of 8.\n", n);
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
-    if (n % size != 0) {
+    if (MATRIX_SIZE % size != 0) {
         if (rank == 0) fprintf(stderr, "Error: N (%d) must be divisible by number of processes (%d).\n", n, size);
         MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
     }
 
-    int rows_per_proc = n / size;
+    int rows_per_proc = MATRIX_SIZE / size;
     size_t block_elems = (size_t)rows_per_proc * n;
 
     /* Root allocates full matrices; others just what they need */
@@ -78,38 +77,38 @@ int main(int argc, char *argv[]) {
     }
 
     if (rank == 0) {
-        A = (int *)malloc((size_t)n * n * sizeof(int));
-        B = (int *)malloc((size_t)n * n * sizeof(int));
-        C = (int *)malloc((size_t)n * n * sizeof(int));
+        A = (int *)malloc((size_t)MATRIX_SIZE * MATRIX_SIZE * sizeof(int));
+        B = (int *)malloc((size_t)MATRIX_SIZE * MATRIX_SIZE * sizeof(int));
+        C = (int *)malloc((size_t)MATRIX_SIZE * MATRIX_SIZE * sizeof(int));
         if (!A || !B || !C) {
             fprintf(stderr, "Root: Memory allocation failure.\n");
             MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
         }
         srand((unsigned)time(NULL));
-        fill_random(A, n * n);
-        fill_random(B, n * n);
+        fill_random(A, MATRIX_SIZE * n);
+        fill_random(B, MATRIX_SIZE * n);
     }
 
     /* Broadcast B to everyone */
     if (rank != 0) {
-        B = (int *)malloc((size_t)n * n * sizeof(int));
+        B = (int *)malloc((size_t)MATRIX_SIZE * MATRIX_SIZE * sizeof(int));
     }
-    MPI_Bcast(B, n * n, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(B, MATRIX_SIZE * n, MPI_INT, 0, MPI_COMM_WORLD);
 
     /* Scatter rows of A */
     MPI_Scatter(A, (int)block_elems, MPI_INT, local_A, (int)block_elems, MPI_INT, 0, MPI_COMM_WORLD);
 
     /* -------------------------------------------------------- */
-    /*        Start timing JUST the multiplication phase         */
+    /*        Start timing JUST the multiplication phase        */
     /* -------------------------------------------------------- */
     MPI_Barrier(MPI_COMM_WORLD);
     double t0 = MPI_Wtime();
 
     for (int i = 0; i < rows_per_proc; ++i) {
-        for (int k = 0; k < n; ++k) {
-            int a_ik = local_A[i * n + k];
-            for (int j = 0; j < n; ++j) {
-                local_C[i * n + j] += a_ik * B[k * n + j];
+        for (int k = 0; k < MATRIX_SIZE; ++k) {
+            int a_ik = local_A[i * MATRIX_SIZE + k];
+            for (int j = 0; j < MATRIX_SIZE; ++j) {
+                local_C[i * MATRIX_SIZE + j] += a_ik * B[k * MATRIX_SIZE + j];
             }
         }
     }
@@ -117,7 +116,7 @@ int main(int argc, char *argv[]) {
     double local_elapsed = MPI_Wtime() - t0;
 
     /* -------------------------------------------------------- */
-    /*        End of multiplication phase                        */
+    /*        End of multiplication phase                       */
     /* -------------------------------------------------------- */
 
     /* Gather times and results */
