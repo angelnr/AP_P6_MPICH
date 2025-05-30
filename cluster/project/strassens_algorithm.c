@@ -1,20 +1,25 @@
+/* strassen_mpi_fixed.c
+ * Versión rápida que evita punteros NULL en los ranks ≠ 0.
+ * Cada proceso mantiene copias completas de A, B y C.
+ */
+
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 
-#define MATRIX_SIZE 1024  // tamaño de la matriz (debe ser múltiplo de 2)
+#define MATRIX_SIZE 1024  /* múltiplo de 2                    */
 #define MAX_VAL 10
 #define MIN_VAL 1
-#define THRESHOLD 32  // Umbral para multiplicación clásica
+#define THRESHOLD 256      /* por debajo: multiplicación clásica */
 
-// Función para llenar la matriz con valores aleatorios
-void fill_random(int *mat, int elements) {
-    for (int i = 0; i < elements; ++i)
-        mat[i] = rand() % (MAX_VAL - MIN_VAL + 1) + MIN_VAL;
+/* ---------- utilidades básicas ---------- */
+void fill_random(int *m, int n) {
+    for (int i = 0; i < n; ++i)
+        m[i] = rand() % (MAX_VAL - MIN_VAL + 1) + MIN_VAL;
 }
 
-// Multiplicación clásica de matrices
 void classic_multiply(int *A, int *B, int *C, int n) {
     for (int i = 0; i < n; ++i)
         for (int j = 0; j < n; ++j)
@@ -22,149 +27,160 @@ void classic_multiply(int *A, int *B, int *C, int n) {
                 C[i * n + j] += A[i * n + k] * B[k * n + j];
 }
 
-// Función para dividir una matriz en submatrices 2x2
-void split_matrix(int *mat, int *submat, int n, int row_start, int col_start) {
-    for (int i = 0; i < n; ++i)
-        for (int j = 0; j < n; ++j)
-            submat[i * n + j] = mat[(i + row_start) * n + (j + col_start)];
+void add_mat(int *A, int *B, int *C, int n) {
+    for (int i = 0; i < n * n; ++i) C[i] = A[i] + B[i];
+}
+void sub_mat(int *A, int *B, int *C, int n) {
+    for (int i = 0; i < n * n; ++i) C[i] = A[i] - B[i];
+}
+void split(int *M, int *S, int n, int r, int c) {
+    /* copia sub-matriz n/2 × n/2 que empieza en (r,c) */
+    int half = n / 2;
+    for (int i = 0; i < half; ++i)
+        for (int j = 0; j < half; ++j)
+            S[i * half + j] = M[(i + r) * n + (j + c)];
 }
 
-// Función para sumar dos matrices
-void add_matrix(int *A, int *B, int *C, int n) {
-    for (int i = 0; i < n; ++i)
-        for (int j = 0; j < n; ++j)
-            C[i * n + j] = A[i * n + j] + B[i * n + j];
-}
-
-// Función para restar dos matrices
-void subtract_matrix(int *A, int *B, int *C, int n) {
-    for (int i = 0; i < n; ++i)
-        for (int j = 0; j < n; ++j)
-            C[i * n + j] = A[i * n + j] - B[i * n + j];
-}
-
-// Función para calcular las 7 multiplicaciones de Strassen
-void strassen_multiply(int *A, int *B, int *C, int n, int rank, int size) {
+/* -------------- Strassen recursivo --------------- */
+void strassen(int *A, int *B, int *C, int n) {
     if (n <= THRESHOLD) {
-        // Si el tamaño de la matriz es pequeño, hacemos multiplicación clásica
         classic_multiply(A, B, C, n);
         return;
     }
 
-    // Dividir las matrices A y B en 4 submatrices
-    int *A11 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *A12 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *A21 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *A22 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *B11 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *B12 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *B21 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *B22 = malloc((n / 2) * (n / 2) * sizeof(int));
+    int half = n / 2;
+    size_t sz = half * half * sizeof(int);
 
-    // Dividir las matrices A y B en submatrices 2x2
-    split_matrix(A, A11, n, 0, 0);
-    split_matrix(A, A12, n, 0, n / 2);
-    split_matrix(A, A21, n, n / 2, 0);
-    split_matrix(A, A22, n, n / 2, n / 2);
-    split_matrix(B, B11, n, 0, 0);
-    split_matrix(B, B12, n, 0, n / 2);
-    split_matrix(B, B21, n, n / 2, 0);
-    split_matrix(B, B22, n, n / 2, n / 2);
+    /* reservar sub-bloques */
+    int *A11 = malloc(sz), *A12 = malloc(sz), *A21 = malloc(sz), *A22 = malloc(sz);
+    int *B11 = malloc(sz), *B12 = malloc(sz), *B21 = malloc(sz), *B22 = malloc(sz);
+    int *M1  = calloc(half * half, sizeof(int));
+    int *M2  = calloc(half * half, sizeof(int));
+    int *M3  = calloc(half * half, sizeof(int));
+    int *M4  = calloc(half * half, sizeof(int));
+    int *M5  = calloc(half * half, sizeof(int));
+    int *M6  = calloc(half * half, sizeof(int));
+    int *M7  = calloc(half * half, sizeof(int));
+    int *T1  = malloc(sz), *T2 = malloc(sz);
 
-    // Crear las 7 matrices auxiliares (M1 a M7)
-    int *M1 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *M2 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *M3 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *M4 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *M5 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *M6 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *M7 = malloc((n / 2) * (n / 2) * sizeof(int));
+    split(A, A11, n, 0,     0);
+    split(A, A12, n, 0,     half);
+    split(A, A21, n, half,  0);
+    split(A, A22, n, half,  half);
+    split(B, B11, n, 0,     0);
+    split(B, B12, n, 0,     half);
+    split(B, B21, n, half,  0);
+    split(B, B22, n, half,  half);
 
-    // Calcular los 7 productos de Strassen
-    // M1 = (A11 + A22) * (B11 + B22)
-    int *temp1 = malloc((n / 2) * (n / 2) * sizeof(int));
-    int *temp2 = malloc((n / 2) * (n / 2) * sizeof(int));
-    add_matrix(A11, A22, temp1, n / 2);
-    add_matrix(B11, B22, temp2, n / 2);
-    strassen_multiply(temp1, temp2, M1, n / 2, rank, size);
+    /* M1 = (A11 + A22)*(B11 + B22) */
+    add_mat(A11, A22, T1, half);
+    add_mat(B11, B22, T2, half);
+    strassen(T1, T2, M1, half);
 
-    // M2 = (A21 + A22) * B11
-    add_matrix(A21, A22, temp1, n / 2);
-    strassen_multiply(temp1, B11, M2, n / 2, rank, size);
+    /* M2 = (A21 + A22) * B11 */
+    add_mat(A21, A22, T1, half);
+    strassen(T1, B11, M2, half);
 
-    // M3 = A11 * (B12 - B22)
-    subtract_matrix(B12, B22, temp2, n / 2);
-    strassen_multiply(A11, temp2, M3, n / 2, rank, size);
+    /* M3 = A11 * (B12 − B22) */
+    sub_mat(B12, B22, T2, half);
+    strassen(A11, T2, M3, half);
 
-    // M4 = A22 * (B21 - B11)
-    subtract_matrix(B21, B11, temp2, n / 2);
-    strassen_multiply(A22, temp2, M4, n / 2, rank, size);
+    /* M4 = A22 * (B21 − B11) */
+    sub_mat(B21, B11, T2, half);
+    strassen(A22, T2, M4, half);
 
-    // M5 = (A11 + A12) * B22
-    add_matrix(A11, A12, temp1, n / 2);
-    strassen_multiply(temp1, B22, M5, n / 2, rank, size);
+    /* M5 = (A11 + A12) * B22 */
+    add_mat(A11, A12, T1, half);
+    strassen(T1, B22, M5, half);
 
-    // M6 = (A21 - A11) * (B11 + B12)
-    subtract_matrix(A21, A11, temp1, n / 2);
-    add_matrix(B11, B12, temp2, n / 2);
-    strassen_multiply(temp1, temp2, M6, n / 2, rank, size);
+    /* M6 = (A21 − A11) * (B11 + B12) */
+    sub_mat(A21, A11, T1, half);
+    add_mat(B11, B12, T2, half);
+    strassen(T1, T2, M6, half);
 
-    // M7 = (A12 - A22) * (B21 + B22)
-    subtract_matrix(A12, A22, temp1, n / 2);
-    add_matrix(B21, B22, temp2, n / 2);
-    strassen_multiply(temp1, temp2, M7, n / 2, rank, size);
+    /* M7 = (A12 − A22) * (B21 + B22) */
+    sub_mat(A12, A22, T1, half);
+    add_mat(B21, B22, T2, half);
+    strassen(T1, T2, M7, half);
 
-    // Recomponer la matriz C a partir de las 7 multiplicaciones
-    // C11 = M1 + M4 - M5 + M7
-    add_matrix(M1, M4, temp1, n / 2);
-    subtract_matrix(temp1, M5, temp1, n / 2);
-    add_matrix(temp1, M7, C, n / 2);
+    /* recomponer C */
+    int *C11 = C;
+    int *C12 = C + half;
+    int *C21 = C + n * half;
+    int *C22 = C + n * half + half;
 
-    // C12 = M3 + M5
-    add_matrix(M3, M5, C + (n / 2), n / 2);
+    /* C11 = M1 + M4 − M5 + M7 */
+    add_mat(M1, M4, T1, half);
+    sub_mat(T1, M5, T1, half);
+    add_mat(T1, M7, C11, half);
 
-    // C21 = M2 + M4
-    add_matrix(M2, M4, C + n * (n / 2), n / 2);
+    /* C12 = M3 + M5 */
+    add_mat(M3, M5, C12, half);
 
-    // C22 = M1 - M2 + M3 + M6
-    subtract_matrix(M1, M2, temp1, n / 2);
-    add_matrix(temp1, M3, temp1, n / 2);
-    add_matrix(temp1, M6, C + n * n / 2, n / 2);
+    /* C21 = M2 + M4 */
+    add_mat(M2, M4, C21, half);
 
-    // Liberar memoria
+    /* C22 = M1 − M2 + M3 + M6 */
+    sub_mat(M1, M2, T1, half);
+    add_mat(T1, M3, T1, half);
+    add_mat(T1, M6, C22, half);
+
+    /* liberar */
     free(A11); free(A12); free(A21); free(A22);
     free(B11); free(B12); free(B21); free(B22);
-    free(M1); free(M2); free(M3); free(M4); free(M5); free(M6); free(M7);
-    free(temp1); free(temp2);
+    free(M1);  free(M2);  free(M3);  free(M4);
+    free(M5);  free(M6);  free(M7);
+    free(T1);  free(T2);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int n = MATRIX_SIZE;
-    int *A = NULL, *B = NULL, *C = NULL;
+    const int n = MATRIX_SIZE;
 
-    // Solo el proceso root inicializa A y B
+    /* 1. reservar A,B,C en todos los procesos */
+    int *A = malloc(n * n * sizeof(int));
+    int *B = malloc(n * n * sizeof(int));
+    int *C = calloc(n * n, sizeof(int));
+
     if (rank == 0) {
-        A = malloc(n * n * sizeof(int));
-        B = malloc(n * n * sizeof(int));
-        C = malloc(n * n * sizeof(int));
+        srand((unsigned)time(NULL));
         fill_random(A, n * n);
         fill_random(B, n * n);
     }
 
-    // Llamada a la multiplicación Strassen
-    strassen_multiply(A, B, C, n, rank, size);
+    /* 2. difundir A y B completas */
+    MPI_Bcast(A, n * n, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(B, n * n, MPI_INT, 0, MPI_COMM_WORLD);
 
-    if (rank == 0) {
-        printf("Multiplicación completada con Strassen distribuido\n");
-        // Liberar matrices
-        free(A); free(B); free(C);
-    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    double t0 = MPI_Wtime();
 
+
+    /* ====  A Q U Í  va la llamada condicional ======================= */
+    if (rank == 0)
+    strassen(A, B, C, n);  /* solo el root */
+    MPI_Barrier(MPI_COMM_WORLD);    
+
+
+    /*
+     3. cada rank ejecuta Strassen (sin reparto real) 
+    strassen(A, B, C, n);
+
+    */
+
+    double elapsed = MPI_Wtime() - t0;
+    double max_time;
+    MPI_Reduce(&elapsed, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    if (rank == 0)
+        printf("Strassen (copia completa en cada nodo) terminó en %.6f s\n",
+               max_time);
+
+    free(A); free(B); free(C);
     MPI_Finalize();
     return 0;
 }
