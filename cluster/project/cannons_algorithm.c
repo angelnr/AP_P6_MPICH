@@ -1,11 +1,11 @@
+// cannon_multiply_parallel.c
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
-#include <time.h>
 
-#define MATRIX_SIZE 1024  // tamaño de matriz, cuadrado
+#define MATRIX_SIZE 1024
 #define MAX_VAL 10
 #define MIN_VAL 1
 
@@ -14,157 +14,90 @@ void fill_random(int *mat, int elements) {
         mat[i] = rand() % (MAX_VAL - MIN_VAL + 1) + MIN_VAL;
 }
 
+void local_multiply(int *A, int *B, int *C, int block) {
+    for (int i = 0; i < block; ++i)
+        for (int k = 0; k < block; ++k)
+            for (int j = 0; j < block; ++j)
+                C[i * block + j] += A[i * block + k] * B[k * block + j];
+}
+
+void shift_matrix(int *mat, int block, int count, int direction, MPI_Comm comm2d) {
+    int src, dst;
+    MPI_Cart_shift(comm2d, direction, 1, &src, &dst);
+    MPI_Sendrecv_replace(mat, block * block, MPI_INT, dst, 0, src, 0, comm2d, MPI_STATUS_IGNORE);
+}
+
 int main(int argc, char *argv[]) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    // Verificar que el número de procesos sea cuadrado perfecto
     int q = (int)sqrt(size);
     if (q * q != size) {
-        if (rank == 0) fprintf(stderr, "Error: Número de procesos (%d) debe ser cuadrado perfecto (ej. 4, 9, 16).\n", size);
+        if (rank == 0) fprintf(stderr, "El número de procesos debe ser un cuadrado perfecto.\n");
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    
+
+    int dims[2] = {q, q}, periods[2] = {1, 1}, coords[2];
+    MPI_Comm comm2d;
+    MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 1, &comm2d);
+    MPI_Cart_coords(comm2d, rank, 2, coords);
+
     int n = MATRIX_SIZE;
-    int block_size = n / q;  // tamaño de bloque local
-    if (n % q != 0) {
-        if (rank == 0) fprintf(stderr, "Error: Tamaño de matriz (%d) debe ser divisible por q (%d)\n", n, q);
-        MPI_Abort(MPI_COMM_WORLD, 1);
+    int block = n / q;
+
+    int *Ablock = malloc(block * block * sizeof(int));
+    int *Bblock = malloc(block * block * sizeof(int));
+    int *Cblock = calloc(block * block, sizeof(int));
+
+    int *A = NULL, *B = NULL;
+    if (rank == 0) {
+        A = malloc(n * n * sizeof(int));
+        B = malloc(n * n * sizeof(int));
+        fill_random(A, n * n);
+        fill_random(B, n * n);
     }
 
-    // Crear topología de malla 2D (toroidal)
-    int dims[2] = {q, q};
-    int periods[2] = {1, 1};  // 1 = conexiones cíclicas (toroidal)
-    MPI_Comm grid_comm;
-    MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periods, 0, &grid_comm);
-    
-    // Obtener coordenadas y vecinos
-    int coords[2];
-    MPI_Cart_coords(grid_comm, rank, 2, coords);
-    int left, right, up, down;
-    MPI_Cart_shift(grid_comm, 1, 1, &left, &right);  // Eje x (columnas)
-    MPI_Cart_shift(grid_comm, 0, 1, &up, &down);      // Eje y (filas)
-
-    // Reservar memoria para bloques locales
-    int *Ablock = malloc(block_size * block_size * sizeof(int));
-    int *Bblock = malloc(block_size * block_size * sizeof(int));
-    int *Cblock = calloc(block_size * block_size, sizeof(int));
-
-    // Matrices globales solo en root
-    int *A_global = NULL, *B_global = NULL, *C_global = NULL;
+    int *Ascat = NULL, *Bscat = NULL;
     if (rank == 0) {
-        A_global = malloc(n * n * sizeof(int));
-        B_global = malloc(n * n * sizeof(int));
-        C_global = calloc(n * n, sizeof(int));
-        srand(time(NULL));
-        fill_random(A_global, n * n);
-        fill_random(B_global, n * n);
-    }
-
-    // Crear tipo de dato para bloques (no contiguos en matriz global)
-    MPI_Datatype block_type;
-    MPI_Type_vector(block_size, block_size, n, MPI_INT, &block_type);
-    MPI_Type_commit(&block_type);
-
-    // Distribuir bloques con desplazamiento inicial (skew)
-    int *sendcounts = NULL;
-    int *displs = NULL;
-    
-    if (rank == 0) {
-        sendcounts = malloc(size * sizeof(int));
-        displs = malloc(size * sizeof(int));
-        for (int i = 0; i < size; i++) sendcounts[i] = 1;
-        
-        // Calcular desplazamientos para distribución skew
-        for (int i = 0; i < q; i++) {
-            for (int j = 0; j < q; j++) {
-                int proc;
-                MPI_Cart_rank(grid_comm, (int[]){i, j}, &proc);
-                
-                // Desplazamiento inicial para A: fila i, columna (j + i) mod q
-                int skew_col_A = (j + i) % q;
-                displs[proc] = i * block_size * n + skew_col_A * block_size;
-                
-                // Desplazamiento inicial para B: fila (i + j) mod q, columna j
-                int skew_row_B = (i + j) % q;
-                displs[proc] = skew_row_B * block_size * n + j * block_size;
-            }
+        Ascat = malloc(size * block * block * sizeof(int));
+        Bscat = malloc(size * block * block * sizeof(int));
+        for (int proc = 0; proc < size; ++proc) {
+            int i = proc / q, j = proc % q;
+            for (int bi = 0; bi < block; ++bi)
+                memcpy(&Ascat[proc * block * block + bi * block],
+                       &A[(i * block + bi) * n + j * block],
+                       block * sizeof(int));
+            for (int bi = 0; bi < block; ++bi)
+                memcpy(&Bscat[proc * block * block + bi * block],
+                       &B[(i * block + bi) * n + j * block],
+                       block * sizeof(int));
         }
     }
 
-    // Distribuir bloques de A y B
-    MPI_Scatterv(A_global, sendcounts, displs, block_type, 
-                Ablock, block_size * block_size, MPI_INT, 
-                0, grid_comm);
-                
-    MPI_Scatterv(B_global, sendcounts, displs, block_type, 
-                Bblock, block_size * block_size, MPI_INT, 
-                0, grid_comm);
+    MPI_Scatter(Ascat, block * block, MPI_INT, Ablock, block * block, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Scatter(Bscat, block * block, MPI_INT, Bblock, block * block, MPI_INT, 0, MPI_COMM_WORLD);
+    if (rank == 0) { free(Ascat); free(Bscat); }
 
-    // Sincronizar y comenzar temporización
-    MPI_Barrier(grid_comm);
+    for (int i = 0; i < coords[0]; ++i) shift_matrix(Ablock, block, q, 1, comm2d);
+    for (int i = 0; i < coords[1]; ++i) shift_matrix(Bblock, block, q, 0, comm2d);
+
+    MPI_Barrier(MPI_COMM_WORLD);
     double t0 = MPI_Wtime();
 
-    // Algoritmo de Cannon (q pasos)
     for (int step = 0; step < q; ++step) {
-        // Multiplicación local: Cblock += Ablock * Bblock
-        for (int i = 0; i < block_size; ++i) {
-            for (int k = 0; k < block_size; ++k) {
-                int a_val = Ablock[i * block_size + k];
-                for (int j = 0; j < block_size; ++j) {
-                    Cblock[i * block_size + j] += a_val * Bblock[k * block_size + j];
-                }
-            }
-        }
-
-        // Rotar bloques: A hacia izquierda, B hacia arriba
-        MPI_Sendrecv_replace(Ablock, block_size * block_size, MPI_INT, 
-                            left, 0, right, 0, grid_comm, MPI_STATUS_IGNORE);
-                            
-        MPI_Sendrecv_replace(Bblock, block_size * block_size, MPI_INT, 
-                            up, 0, down, 0, grid_comm, MPI_STATUS_IGNORE);
+        local_multiply(Ablock, Bblock, Cblock, block);
+        shift_matrix(Ablock, block, q, 1, comm2d);
+        shift_matrix(Bblock, block, q, 0, comm2d);
     }
 
-    // Detener tiempo y recolectar resultados
-    double local_elapsed = MPI_Wtime() - t0;
-    double max_elapsed;
-    MPI_Reduce(&local_elapsed, &max_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, grid_comm);
+    double elapsed = MPI_Wtime() - t0;
+    if (rank == 0) printf("Cannon completado en %.6f segundos\n", elapsed);
 
-    // Recolectar bloques de resultado
-    MPI_Gatherv(Cblock, block_size * block_size, MPI_INT,
-               C_global, sendcounts, displs, block_type,
-               0, grid_comm);
-
-    // Reportar resultados
-    if (rank == 0) {
-        printf("Cannon completado en %.6f segundos\n", max_elapsed);
-        
-        // Verificación opcional (solo para matrices pequeñas)
-        if (n <= 8) {
-            printf("Resultado C[0:3][0:3]:\n");
-            for (int i = 0; i < 4; i++) {
-                for (int j = 0; j < 4; j++) {
-                    printf("%d ", C_global[i * n + j]);
-                }
-                printf("\n");
-            }
-        }
-        
-        free(A_global);
-        free(B_global);
-        free(C_global);
-        free(sendcounts);
-        free(displs);
-    }
-
-    // Liberar recursos
-    MPI_Type_free(&block_type);
-    free(Ablock);
-    free(Bblock);
-    free(Cblock);
-    MPI_Comm_free(&grid_comm);
+    free(Ablock); free(Bblock); free(Cblock);
+    if (rank == 0) { free(A); free(B); }
+    MPI_Comm_free(&comm2d);
     MPI_Finalize();
     return 0;
 }
